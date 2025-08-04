@@ -1,0 +1,208 @@
+#!/bin/bash
+
+# ==============================================================================
+# Interactive Shell Script to Automate AWS EC2 Instance Creation
+# ==============================================================================
+# This script interactively guides the user through creating an EC2 instance.
+# It allows for selection of instance details, key pairs, and security groups.
+# ==============================================================================
+
+# --- Prerequisite Check ---
+# Check if the AWS CLI and jq are installed before proceeding.
+if ! command -v aws &> /dev/null; then
+    echo "Error: AWS CLI could not be found."
+    echo "Please install and configure the AWS CLI before running this script."
+    exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq (a JSON processor) could not be found."
+    echo "Please install jq to run this script. On Debian/Ubuntu: sudo apt-get install jq"
+    exit 1
+fi
+
+# --- Configuration ---
+AWS_REGION="us-east-1" # Change this to your preferred region
+set -e # Exit immediately if a command exits with a non-zero status.
+
+# --- Function Definitions ---
+
+# Function to select instance details
+select_instance_details() {
+    echo "--- Step 1: Configure Instance Details ---"
+    read -p "Enter a name for your instance (e.g., MyWebServer): " INSTANCE_NAME
+
+    echo "Select an Amazon Machine Image (AMI):"
+    PS3="Choose an AMI: "
+    select ami_choice in "Amazon Linux 2023" "Ubuntu Server 24.04 LTS" "Ubuntu Server 22.04 LTS" "Enter AMI ID manually"; do
+        case $ami_choice in
+            "Amazon Linux 2023")
+                AMI_ID=$(aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --region "$AWS_REGION" --query "Parameter.Value" --output text)
+                USER_NAME="ec2-user"
+                break
+                ;;
+            "Ubuntu Server 24.04 LTS")
+                AMI_ID=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp2/ami-id --region "$AWS_REGION" --query "Parameter.Value" --output text)
+                USER_NAME="ubuntu"
+                break
+                ;;
+            "Ubuntu Server 22.04 LTS")
+                 AMI_ID=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --region "$AWS_REGION" --query "Parameter.Value" --output text)
+                 USER_NAME="ubuntu"
+                 break
+                ;;
+            "Enter AMI ID manually")
+                read -p "Enter the AMI ID (e.g., ami-xxxxxxxxxxxxxxxxx): " AMI_ID
+                read -p "Enter the default username for this AMI (e.g., ec2-user): " USER_NAME
+                break
+                ;;
+            *) echo "Invalid option. Please try again.";;
+        esac
+    done
+
+    echo "Select an instance type:"
+    PS3="Choose an instance type: "
+    select type_choice in "t2.micro (Free Tier)" "t3.micro" "t3.small" "Enter instance type manually"; do
+        case $type_choice in
+            "t2.micro (Free Tier)") INSTANCE_TYPE="t2.micro"; break;;
+            "t3.micro") INSTANCE_TYPE="t3.micro"; break;;
+            "t3.small") INSTANCE_TYPE="t3.small"; break;;
+            "Enter instance type manually") read -p "Enter instance type: " INSTANCE_TYPE; break;;
+            *) echo "Invalid option. Please try again.";;
+        esac
+    done
+    echo
+}
+
+# Function to manage key pair selection
+manage_key_pair() {
+    echo "--- Step 2: Configure Key Pair ---"
+    echo "Do you want to create a new key pair or use an existing one?"
+    PS3="Choose an option: "
+    select kp_choice in "Create a new key pair" "Use an existing key pair"; do
+        case $kp_choice in
+            "Create a new key pair")
+                read -p "Enter a name for the new key pair: " KEY_NAME
+                aws ec2 create-key-pair --key-name "$KEY_NAME" --query "KeyMaterial" --output text > "${KEY_NAME}.pem"
+                chmod 400 "${KEY_NAME}.pem"
+                echo "Key pair '${KEY_NAME}.pem' created and permissions set to 400."
+                break
+                ;;
+            "Use an existing key pair")
+                echo "Fetching available key pairs..."
+                key_pairs=$(aws ec2 describe-key-pairs --query "KeyPairs[].KeyName" --output json)
+                if [ "$(echo "$key_pairs" | jq '. | length')" -eq 0 ]; then
+                    echo "No existing key pairs found in region $AWS_REGION. Please create one first."
+                    exit 1
+                fi
+                echo "Select an existing key pair:"
+                PS3="Choose a key pair: "
+                select existing_key in $(echo "$key_pairs" | jq -r '.[]'); do
+                    if [ -n "$existing_key" ]; then
+                        KEY_NAME=$existing_key
+                        break
+                    else
+                        echo "Invalid selection."
+                    fi
+                done
+                break
+                ;;
+            *) echo "Invalid option. Please try again.";;
+        esac
+    done
+    echo
+}
+
+# Function to manage security group selection
+manage_security_group() {
+    echo "--- Step 3: Configure Security Group (Firewall) ---"
+    echo "Do you want to create a new security group or use an existing one?"
+    PS3="Choose an option: "
+    select sg_choice in "Create a new security group" "Use an existing security group"; do
+        case $sg_choice in
+            "Create a new security group")
+                read -p "Enter a name for the new security group: " SECURITY_GROUP_NAME
+                GROUP_ID=$(aws ec2 create-security-group --group-name "$SECURITY_GROUP_NAME" --description "Security group for instance $INSTANCE_NAME" --query "GroupId" --output text)
+                echo "Security Group created with ID: $GROUP_ID"
+                echo "Authorizing SSH access..."
+                aws ec2 authorize-security-group-ingress --group-id "$GROUP_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0
+                echo "Inbound SSH rule added."
+                break
+                ;;
+            "Use an existing security group")
+                echo "Fetching available security groups..."
+                security_groups=$(aws ec2 describe-security-groups --query "SecurityGroups[].{Name:GroupName, ID:GroupId}" --output json)
+                if [ "$(echo "$security_groups" | jq '. | length')" -eq 0 ]; then
+                    echo "No existing security groups found in region $AWS_REGION."
+                    exit 1
+                fi
+                echo "Select an existing security group:"
+                PS3="Choose a security group: "
+                select existing_sg in $(echo "$security_groups" | jq -r '.[] | "\(.Name) (\(.ID))"'); do
+                    if [ -n "$existing_sg" ]; then
+                        # Extract the GroupId from the selection
+                        GROUP_ID=$(echo "$existing_sg" | grep -o -E 'sg-[0-9a-f]+')
+                        break
+                    else
+                        echo "Invalid selection."
+                    fi
+                done
+                break
+                ;;
+            *) echo "Invalid option. Please try again.";;
+        esac
+    done
+    echo
+}
+
+
+# --- Main Script Execution ---
+clear
+echo "Welcome to the Interactive EC2 Instance Creator!"
+echo "================================================"
+
+select_instance_details
+manage_key_pair
+manage_security_group
+
+echo "--- Step 4: Launching the EC2 Instance ---"
+echo "Summary of your selections:"
+echo "  Instance Name: $INSTANCE_NAME"
+echo "  AMI ID: $AMI_ID"
+echo "  Instance Type: $INSTANCE_TYPE"
+echo "  Key Pair: $KEY_NAME"
+echo "  Security Group ID: $GROUP_ID"
+echo
+
+read -p "Press [Enter] to confirm and launch the instance..."
+
+INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id "$AMI_ID" \
+    --instance-type "$INSTANCE_TYPE" \
+    --key-name "$KEY_NAME" \
+    --security-group-ids "$GROUP_ID" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]" \
+    --query "Instances[0].InstanceId" \
+    --output text)
+echo "Instance launch initiated. Instance ID: $INSTANCE_ID"
+echo
+
+echo "--- Waiting for the instance to enter the 'running' state... ---"
+aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+echo "Instance is now running."
+echo
+
+echo "--- Retrieving Public IP Address ---"
+PUBLIC_IP=$(aws ec2 describe-instances \
+    --instance-ids "$INSTANCE_ID" \
+    --query "Reservations[0].Instances[0].PublicIpAddress" \
+    --output text)
+echo "Public IP Address: $PUBLIC_IP"
+echo
+
+echo "--- SUCCESS! ---"
+echo "Your EC2 instance '$INSTANCE_NAME' has been created."
+echo
+echo "To connect, use the following command (ensure your .pem file is in the current directory if you created a new key):"
+echo "ssh -i \"${KEY_NAME}.pem\" ${USER_NAME}@${PUBLIC_IP}"
+echo

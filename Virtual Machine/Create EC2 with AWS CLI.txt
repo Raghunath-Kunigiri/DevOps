@@ -4,14 +4,14 @@ STEP 1: Create a Secure Key Pair 🔑
 First, create the key pair in AWS and save the private key directly to a .pem file.
 
 Bash
-aws ec2 create-key-pair --key-name Devkeyprac --query "KeyMaterial" --output text > Devkeyprac.pem
+aws ec2 create-key-pair --key-name Devkey --query "KeyMaterial" --output text > Devkey.pem
 
 
 STEP 2: Create a Security Group 🛡️
 Next, create a security group to act as a virtual firewall for the instance.
 
 Bash
-aws ec2 create-security-group --group-name DevPracticeSG --description "Security group for DevPractice instance"
+aws ec2 create-security-group --group-name DevPracSG --description "Security group for DevPractice instance"
 
 ➡️ Heads up: You'll need to copy the GroupId (e.g., sg-xxxxxxxxxxxxxxxxx) from the output of this command for the next steps!
 
@@ -25,6 +25,16 @@ STEP 4: Launch the EC2 Instance! 🚀
 Finally, launch the instance using the specific AMI, instance type, key pair, security group, and a name tag.
 
 Bash
-aws ec2 run-instances --image-id ami-05f991c49d264708f --instance-type t2.micro --key-name Devkeyprac --security-group-ids <Your-Security-Group-ID> --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=Devpractice}]"
+aws ec2 run-instances --image-id ami-020cba7c55df1f615 --instance-type t2.micro --key-name Devkey --security-group-ids sg-07218a023d9dd57ca --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=Devprac}]"
 
 Going through each step on the command line really solidifies the concepts behind cloud infrastructure. It’s a great exercise!
+
+
+To check created instance details 
+Bash
+aws ec2 describe-instances --query "Reservations[*].Instances[*].{ID:InstanceId, Name:Tags[?Key=='Name']|[0].Value, Type:InstanceType, State:State.Name, IP:PublicIpAddress}" --output table
+
+
+
+Command to connect to Instance : 
+ssh -i Devkey.pem ubuntu@IP-address
